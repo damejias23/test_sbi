@@ -1,0 +1,270 @@
+/*
+ * Licensed to the OpenAirInterface (OAI) Software Alliance under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The OpenAirInterface Software Alliance licenses this file to You under
+ * the OAI Public License, Version 1.1  (the "License"); you may not use this
+ * file except in compliance with the License. You may obtain a copy of the
+ * License at
+ *
+ *      http://www.openairinterface.org/?page_id=698
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *-------------------------------------------------------------------------------
+ * For more information about the OpenAirInterface (OAI) Software Alliance:
+ *      contact@openairinterface.org
+ */
+
+/*
+ * Author: Abdelkader Mekrache <mekrache@eurecom.fr>
+ * Author: Karim Boutiba 	   <boutiba@eurecom.fr>
+ * Author: Arina Prostakova    <prostako@eurecom.fr>
+ * Description: This file contains functions related amf post notifications.
+ */
+
+package sbi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"time"
+
+	udm_client "/internal/udmclient"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+// ------------------------------------------------------------------------------
+func storeAmfNotificationOnDB(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+
+	case "POST":
+		log.Printf("Storing AMF notification in Database")
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Error reading request body", http.StatusInternalServerError)
+			return
+		}
+		var udmNotification *udm_client.MonitoringReport
+		err = json.Unmarshal(body, &udmNotification)
+		if err != nil {
+			http.Error(w, "Error unmarshaling JSON", http.StatusBadRequest)
+			return
+		}
+		eventTyp, ok := udmNotification.GetEventTypeOk()
+		if !ok {
+			http.Error(w, "Error in getting EventType from UDM notification", http.StatusBadRequest)
+			return
+		}
+		databaseName := config.Database.DbName
+		collectionName := config.Database.CollectionUdmName
+		udmCollection := mongoClient.Database(databaseName).Collection(collectionName)
+		opts := options.Update().SetUpsert(true)
+		// store reports one by one
+		for _, event := range eventTyp {
+			oid := report.GetSupi()
+			// log.Printf("\n\n---------------->%s<-------------------------------\n\n",report)
+			if oid == "" {
+				http.Error(w, "supi not found in report, cannot create object id", http.StatusBadRequest)
+				return
+			}
+			update, err := getUpdateByReport(event)
+			if err != nil {
+				http.Error(w, "error in getUpdateByReport", http.StatusBadRequest)
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			res, err := udmCollection.UpdateByID(ctx, oid, update, opts)
+			if err != nil {
+				http.Error(w, "error in updating the AMF collection", http.StatusBadRequest)
+				return
+			}
+			if res.MatchedCount != 0 {
+				log.Printf("Matched and updated an existing notification report from Udm")
+			}
+			if res.UpsertedCount != 0 {
+				log.Printf("Inserted a new notification report from Udm with ID %v\n",
+					res.UpsertedID)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ------------------------------------------------------------------------------
+// getUpdateByReport - Return update bson.D by report
+func getUpdateByEvent(report udm_client.MonitoringReport) (bson.D, error) {
+	var update bson.D
+	var err error
+	log.Printf("------->>> %s \n\n",report.GetType())
+	// switch report.GetType() {
+	// case amf_client.AMFEVENTTYPEANYOF_REGISTRATION_STATE_REPORT:
+	// 	update, err = getUpdateRegistration(report)
+	// case amf_client.AMFEVENTTYPEANYOF_LOCATION_REPORT:
+	// 	update, err = getUpdateLocation(report)
+	// case amf_client.AMFEVENTTYPEANYOF_LOSS_OF_CONNECTIVITY:
+	// 	update, err = getUpdateLossOfConnectivity(report)
+	// case amf_client.AMFEVENTTYPEANYOF_REACHABILITY_REPORT:
+	// 	update, err = getUpdateReachabilityReport(report)
+	// case amf_client.AMFEVENTTYPEANYOF_CONNECTIVITY_STATE_REPORT:
+	// 	update, err = getUpdateConnectivityStateReport(report)
+	// case amf_client.AMFEVENTTYPEANYOF_COMMUNICATION_FAILURE_REPORT:
+	// 	update, err = getUpdateCommunicationFailureReport(report)
+	// default:
+	// 	log.Printf("report type %s is not supported currently", string(report.GetType()))
+	// 	return nil, errors.New("invalid report type")
+	// }
+	if err != nil {
+		return nil, err
+	}
+	return update, nil
+}
+
+// // ------------------------------------------------------------------------------
+// // getUpdateRegistration - Create update bson.D in case of registration
+// func getUpdateRegistration(report amf_client.AmfEventReport) (bson.D, error) {
+// 	rmInfoList, ok := report.GetRmInfoListOk()
+// 	if !ok {
+// 		return nil, errors.New("failed to get RmInfoList")
+// 	}
+// 	timeStamp := time.Now().Unix()
+// 	// TODO: fix (get rid of) the "RmStateAnyOf" field
+// 	push := rmInfo{
+// 		RmInfo:    rmInfoList[len(rmInfoList)-1],
+// 		TimeStamp: timeStamp,
+// 	}
+// 	update := bson.D{
+// 		{"$set", bson.D{
+// 			{"lastmodified", timeStamp},
+// 		}},
+// 		{"$push", bson.M{
+// 			"rminfolist": &push,
+// 		}},
+// 	}
+// 	return update, nil
+// }
+
+// // ------------------------------------------------------------------------------
+// // getUpdateLocation - Create update bson.D in case of Location
+// func getUpdateLocation(report amf_client.AmfEventReport) (bson.D, error) {
+// 	locationObj, ok := report.GetLocationOk()
+// 	if !ok {
+// 		return nil, errors.New("failed to get Location")
+// 	}
+// 	timeStamp := time.Now().Unix()
+// 	push := location{UserLocation: *locationObj, TimeStamp: timeStamp}
+// 	update := bson.D{
+// 		{"$set", bson.D{
+// 			{"lastmodified", timeStamp},
+// 		}},
+// 		{"$push", bson.M{
+// 			"locationlist": &push,
+// 		}},
+// 	}
+// 	return update, nil
+// }
+
+// // ------------------------------------------------------------------------------
+// // getUpdateLossOfConnectivity - Create update bson.D in case of Loss of connectivity
+// func getUpdateLossOfConnectivity(report amf_client.AmfEventReport) (bson.D, error) {
+// 	lossOfConnectReasonObj, ok := report.GetLossOfConnectReasonOk()
+// 	if !ok {
+// 		return nil, errors.New("failed to get lossOfConnectReason")
+// 	}
+// 	timeStamp := time.Now().Unix()
+// 	push := lossOfConnectReason{
+// 		LossOfConnectReason: *lossOfConnectReasonObj.LossOfConnectivityReasonAnyOf,
+// 		TimeStamp:           timeStamp,
+// 	}
+// 	update := bson.D{
+// 		{"$set", bson.D{
+// 			{"lastmodified", timeStamp},
+// 		}},
+// 		{"$push", bson.M{
+// 			"lossofconnectreasonlist": &push,
+// 		}},
+// 	}
+// 	return update, nil
+// }
+
+// // ------------------------------------------------------------------------------
+// // getUpdateReachabilityReport - Create update bson.D in case of Reachability Report
+// func getUpdateReachabilityReport(report amf_client.AmfEventReport) (bson.D, error) {
+// 	reachabilityReportObj, ok := report.GetReachabilityOk()
+// 	if !ok {
+// 		return nil, errors.New("failed to get ReachabilityReport")
+// 	}
+// 	timeStamp := time.Now().Unix()
+// 	push := Reachability{
+// 		UeReachability: *reachabilityReportObj.UeReachabilityAnyOf,
+// 		TimeStamp:      timeStamp,
+// 	}
+// 	update := bson.D{
+// 		{"$set", bson.D{
+// 			{"lastmodified", timeStamp},
+// 		}},
+// 		{"$push", bson.M{
+// 			"reachabilityreportlist": &push,
+// 		}},
+// 	}
+// 	return update, nil
+// }
+
+// // ------------------------------------------------------------------------------
+// // getUpdateConnectivityStateReport - Create update bson.D in case of Connectivity State Report
+// func getUpdateConnectivityStateReport(report amf_client.AmfEventReport) (bson.D, error) {
+// 	cmInfoList, ok := report.GetCmInfoListOk()
+// 	if !ok {
+// 		return nil, errors.New("failed to get CmInfoList")
+// 	}
+// 	timeStamp := time.Now().Unix()
+// 	push := cmInfo{
+// 		CmInfo:    cmInfoList[len(cmInfoList)-1],
+// 		TimeStamp: timeStamp,
+// 	}
+// 	update := bson.D{
+// 		{"$set", bson.D{
+// 			{"lastmodified", timeStamp},
+// 		}},
+// 		{"$push", bson.M{
+// 			"cminfolist": &push,
+// 		}},
+// 	}
+// 	return update, nil
+// }
+
+// // ------------------------------------------------------------------------------
+// // getUpdateCommunicationFailureReport - Create update bson.D in case of Communication Failure Report
+// func getUpdateCommunicationFailureReport(report amf_client.AmfEventReport) (bson.D, error) {
+// 	commFailureObj, ok := report.GetCommFailureOk()
+// 	if !ok {
+// 		return nil, errors.New("failed to get CommFailure")
+// 	}
+// 	timeStamp := time.Now().Unix()
+// 	push := CommFailure{
+// 		// NasReleaseCode: *commFailureObj.NasReleaseCode,
+// 		RanReleaseCode: *commFailureObj.RanReleaseCode,
+// 		TimeStamp:      timeStamp,
+// 	}
+// 	update := bson.D{
+// 		{"$set", bson.D{
+// 			{"lastmodified", timeStamp},
+// 		}},
+// 		{"$push", bson.M{
+// 			"cminfolist": &push,
+// 		}},
+// 	}
+// 	return update, nil
+// }
